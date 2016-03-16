@@ -1,0 +1,7 @@
+name = Webform CC
+description = Adds a CC: header to E-mail sent by Webform
+package = Webform
+dependencies[] = webform
+files[] = webform_cc.module
+core = 7.x
+

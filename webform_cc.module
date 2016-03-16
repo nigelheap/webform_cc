@@ -1,0 +1,182 @@
+<?php
+
+/**
+ * @file
+ * The Webform CC module, which adds a CC header to Webform E-mail.
+ */
+
+/**
+ * Implements hook_form_alter().
+ */
+function webform_cc_form_alter(&$form, &$form_state, $form_id) {
+  if ($form_id == 'webform_email_edit_form') {
+    $node = $form['#node'];
+    if ($form['eid']['#value']) {
+      $email = $node->webform['emails'][$form['eid']['#value']];
+    }
+    $field = 'cc';
+    $default_value = t('No CC address');
+    $title = t('CC address');
+    $description = t('Any e-mail, select, or hidden form element may be selected as the CC e-mail address.');
+
+    $form[$field . '_option'] = array(
+      '#title' => check_plain($title),
+      '#type' => 'radios',
+      '#default_value' => (isset($email) && is_numeric($email[$field])) ? 'component' : ((empty($default_value) || (isset($email) && isset($email[$field]) && $email[$field] != 'default')) ? 'custom' : 'default'),
+      '#description' => $description,
+    );
+    if (!empty($default_value)) {
+      $form[$field . '_option']['#options']['default'] = t('Default: %value', array('%value' => $default_value));
+    }
+    $form[$field . '_option']['#options']['custom'] = t('Custom');
+    $form[$field . '_option']['#options']['component'] = t('Component');
+
+    $form[$field . '_custom'] = array(
+      '#type' => 'textfield',
+      '#size' => 40,
+      '#default_value' => (isset($email) && isset($email[$field]) && !is_numeric($email[$field]) && $email[$field] != 'default') ? $email[$field] : NULL,
+      '#maxlength' => 255,
+    );
+    $options = webform_component_list($node, 'email_address', FALSE);
+    $form[$field . '_component'] = array(
+      '#type' => 'select',
+      '#default_value' =>  (isset($email) && isset($email[$field]) && is_numeric($email[$field])) ? $email[$field] : NULL,
+      '#options' => empty($options) ? array('' => t('No available components')) : $options,
+      '#disabled' => empty($options) ? TRUE : FALSE,
+      '#weight' => 6,
+    );
+
+    $form['#validate'][] = 'webform_cc_form_validate';
+    $form['#submit'][] = 'webform_cc_form_submit';
+  }
+}
+
+function webform_cc_form_validate($form, &$form_state) {
+  if ($form_state['values']['cc_option'] == 'custom' && !valid_email_address($form_state['values']['cc_custom'])) {
+    form_set_error('cc_custom', t('The entered e-mail address "@email" does not appear valid.', array('@email' => $form_state['values']['cc_custom'])));
+  }
+}
+
+function webform_cc_form_submit($form, &$form_state) {
+  // Ensure a webform record exists.
+  $node = $form['#node'];
+  webform_ensure_record($node);
+
+  $email = array(
+    'eid' => $form_state['values']['eid'],
+    'nid' => $node->nid,
+  );
+  $field = 'cc';
+  $option = $form_state['values'][$field . '_option'];
+  if ($option == 'default') {
+    $email[$field] = 'default';
+  }
+  else {
+    $email[$field] = $form_state['values'][$field . '_' . $option];
+  }
+  // We should be using webform_email_update($email), but it returns an error due to
+  // the NULL $email['excluded_components'], so we use drupal_write_record instead
+  drupal_write_record('webform_emails', $email, array('nid', 'eid'));
+}
+
+/**
+ * Implements hook_theme().
+ */
+function webform_cc_theme($existing, $type, $theme, $path) {
+  return array(
+    'webform_cc_mail_headers' => array(
+      'variables' => array('node' => NULL, 'submission' => NULL, 'email' => NULL),
+      'pattern' => 'webform_mail_headers_[0-9]+',
+    ),
+    'webform_cc_email_edit_form' => array(
+      'render element' => 'form',
+    ),
+  );
+}
+
+/**
+ * Implements hook_theme_registry_alter().
+ */
+function webform_cc_theme_registry_alter(&$theme_registry) {
+  // Set the current theme defintions as fallbacks
+  $theme_registry['webform_cc_mail_headers_fallback'] = $theme_registry['webform_mail_headers'];
+  $theme_registry['webform_cc_email_edit_form_fallback'] = $theme_registry['webform_email_edit_form'];
+  // Override the current theme definitions
+  $theme_registry['webform_mail_headers'] = $theme_registry['webform_cc_mail_headers'];
+  $theme_registry['webform_email_edit_form'] = $theme_registry['webform_cc_email_edit_form'];
+}
+
+
+function theme_webform_cc_mail_headers($variables)  {
+  $node=$variables['node'];
+  $submission=$variables['submission'];
+  $email=$variables['email'];
+
+  $headers = theme('webform_cc_mail_headers_fallback', $variables);
+  if ($cc = webform_format_cc_address($email['cc'], $node, $submission)) {
+    $headers['CC'] = $cc;
+  }
+  return $headers;
+}
+
+function webform_format_cc_address($cc, $node = NULL, $submission = NULL) {
+  if ($cc == 'default') {
+    return FALSE;
+  }
+  elseif (is_numeric($cc) && isset($node->webform['components'][$cc])) {
+    if (isset($submission->data[$cc])) {
+      $values = $submission->data[$cc];
+      $cc = array();
+      foreach ($values as $value) {
+        $cc = array_merge($cc, explode(',', $value));
+      }
+    }
+    else {
+      $cc = t('Value of "!component"', array('!component' => $node->webform['components'][$cc]['name']));
+    }
+  }
+
+  // Address may be an array if a component value was used on checkboxes.
+  if (is_array($cc)) {
+    foreach ($cc as $key => $individual_address) {
+      $cc[$key] = _webform_filter_values($individual_address, $node, $submission, NULL, FALSE);
+    }
+    $cc = implode(',', $cc);
+  }
+  else {
+    $cc = _webform_filter_values($cc, $node, $submission, NULL, FALSE);
+  }
+  return $cc;
+}
+
+function theme_webform_cc_email_edit_form($variables) {
+  $form = $variables['form'];
+
+  $field = 'cc';
+
+  foreach (array('custom', 'component') as $option) {
+    $form[$field . '_' . $option]['#attributes']['class'][] = 'webform-set-active';
+    $form[$field . '_' . $option]['#theme_wrappers'] = array();
+    $form[$field . '_option'][$option]['#theme_wrappers'] = array('webform_inline_radio');
+    $form[$field . '_option'][$option]['#title'] = t('!title: !field', array('!title' => $form[$field . '_option'][$option]['#title'], '!field' => drupal_render($form[$field . '_' . $option])));
+  }
+  if (isset($form[$field . '_option']['#options']['default'])) {
+    $form[$field]['#theme_wrappers'] = array();
+    $form[$field . '_option']['default']['#theme_wrappers'] = array('webform_inline_radio');
+  }
+
+  $details = '';
+  $details = drupal_render($form[$field . '_option']);
+  $form['cc_details'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('E-mail CC details'),
+    '#weight' => 11,
+    '#children' => $details,
+    '#collapsible' => FALSE,
+    '#parents' => array('details'),
+    '#groups' => array('details' => array()),
+    '#attributes' => array(),
+  );
+
+  return theme('webform_cc_email_edit_form_fallback', $form);
+}
